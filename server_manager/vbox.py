@@ -1,6 +1,8 @@
 from __future__ import annotations
 from contextlib import contextmanager, suppress
 from enum import Enum
+from functools import cached_property
+import json
 from pathlib import Path
 import re
 from subprocess import CompletedProcess
@@ -11,6 +13,7 @@ from typing import Any, Callable, Generator, TypeVar
 
 from altair import Literal
 import numpy
+import pydantic
 
 
 class Metrics(Enum):
@@ -42,6 +45,12 @@ class VMState(Enum):
         return VMState.Other
 
 
+class UserInfo(pydantic.BaseModel):
+    username: str
+    password: str
+    is_admin: bool
+
+
 class VirtualMachine:
 
     def __init__(self, manage: VBoxManage, id: str, name: str) -> None:
@@ -50,23 +59,12 @@ class VirtualMachine:
         self.name = name
 
     @property
-    def info(self) -> dict[str, Any]:
-        result = self.manage.run("showvminfo", self.id, "--machinereadable")
+    def users(self) -> list[UserInfo]:
+        return self.manage.user_info.get(self.id, [])
 
-        def _() -> Generator[tuple[str, str], None, None]:
-            for line in result.stdout.decode().splitlines():
-                if "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip('"')
-                value = value.strip('"')
-                yield key, value
-
-        return dict(_())
-
-    @property
-    def state(self) -> VMState:
-        return VMState(self.info.get("VMState", "").casefold())
+    @cached_property
+    def info(self) -> VirtualMachineInfo:
+        return VirtualMachineInfo(vm=self)
 
     def query_metric(self, name: str, converter: Callable[[str], T] = str) -> T:
         result = self.manage.run("metrics", "query", self.id, name)
@@ -95,16 +93,100 @@ class VirtualMachine:
     ) -> list[float]:
         return self._metrics[self.id][metric]
 
+    def guest_control_run(
+        self, user: UserInfo, command: str, args: list[str]
+    ) -> CompletedProcess[bytes]:
+        return self._run(
+            "guestcontrol",
+            self.id,
+            "run",
+            "--username",
+            user.username,
+            "--password",
+            user.password,
+            "--exe",
+            command,
+            "--",
+            *args,
+        )
+
+    def _run(self, *args: str, **kwargs: Any) -> CompletedProcess[bytes]:
+        return self.manage.run(*args, **kwargs)
+
+
+class VirtualMachineInfo:
+
+    def __init__(self, vm: VirtualMachine) -> None:
+        self.vm = vm
+        self.manage = vm.manage
+        self._info: dict[str, str] = {}
+        self.reload()
+
+    def reload(self) -> None:
+        result = self._run("showvminfo", self.vm.id, "--machinereadable")
+
+        def _() -> Generator[tuple[str, str], None, None]:
+            for line in result.stdout.decode().splitlines():
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip('"')
+                value = value.strip('"')
+                yield key, value
+
+        self._info = dict(_())
+
+    def _run(self, *args: str, **kwargs: Any) -> CompletedProcess[bytes]:
+        return self.manage.run(*args, **kwargs)
+
+    @property
+    def state(self) -> VMState:
+        return VMState(self._info.get("VMState", "").casefold())
+
+    @property
+    def system(self) -> str:
+        return self._info.get("ostype", "<unknown>")
+
+    def items(self) -> Generator[tuple[str, str], None, None]:
+        yield from self._info.items()
+
+    def __getitem__(self, key: str) -> Any:
+        return self._info[key]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._info.get(key, default)
+
 
 class VBoxManage:
 
     def __init__(self, executable: Path = Path("/usr/bin/vboxmanage")) -> None:
         self.executable = executable
         self.metric_daemon = VboxMetricDaemon(self)
+        self.user_info = self._load_user_info()
+
+    def _load_user_info(self) -> dict[str, list[UserInfo]]:
+        file_name = "users.json"
+        server_manager_config = Path("~/.config/server_manager/").expanduser()
+
+        for path in [
+            Path.cwd() / file_name,
+            server_manager_config / file_name,
+        ]:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                return {
+                    vm_name: [UserInfo(**value) for value in user_info_list]
+                    for vm_name, user_info_list in data.items()
+                }
+
+        server_manager_config.mkdir(parents=True, exist_ok=True)
+        (server_manager_config / file_name).write_text("{}")
+
+        return {}
 
     def run(
         self, *args: str, capture_output: bool = True, **kwargs: Any
-    ) -> CompletedProcess:
+    ) -> CompletedProcess[bytes]:
         return subprocess.run(
             [self.executable.as_posix(), *args],
             executable=self.executable.as_posix(),
