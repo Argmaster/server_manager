@@ -84,14 +84,10 @@ class VirtualMachine:
 
         return converter(data)
 
-    @property
-    def _metrics(self) -> dict[str, dict[str | Metrics, list[float]]]:
-        return self.manage.metric_daemon.metrics
-
     def get_metric_history(
         self, metric: Metrics | Literal["time_stamp"]
     ) -> list[float]:
-        return self._metrics[self.id][metric]
+        return self.manage.metric_daemon.get_metric_history(self, metric)
 
     def guest_control_run(
         self, user: UserInfo, command: str, args: list[str]
@@ -112,6 +108,24 @@ class VirtualMachine:
 
     def _run(self, *args: str, **kwargs: Any) -> CompletedProcess[bytes]:
         return self.manage.run(*args, **kwargs)
+
+    def start(self, type: str = "headless") -> None:
+        self._run("startvm", self.id, "--type", type)
+
+    def shutdown(self) -> None:
+        self._run("controlvm", self.id, "acpipowerbutton")
+
+    def kill(self) -> None:
+        self._run("controlvm", self.id, "poweroff")
+
+    def pause(self) -> None:
+        self._run("controlvm", self.id, "pause")
+
+    def save(self) -> None:
+        self._run("controlvm", self.id, "savestate")
+
+    def resume(self) -> None:
+        self._run("controlvm", self.id, "resume")
 
 
 class VirtualMachineInfo:
@@ -205,7 +219,7 @@ class VBoxManage:
                 yield VirtualMachine(self, id, name)
 
     def get_running_machines(self) -> list[VirtualMachine]:
-        return [vm for vm in self.list_vm() if vm.state == VMState.Running]
+        return [vm for vm in self.list_vm() if vm.info.state == VMState.Running]
 
     def metrics_enable(self) -> None:
         self.run("metrics", "enable")
@@ -346,6 +360,13 @@ class VboxMetricDaemon:
                 self.metrics[vm.id] = vm_metric_data
 
             time.sleep(self.interval_seconds)
+
+    def get_metric_history(
+        self, vm: VirtualMachine, metric: Metrics | Literal["time_stamp"]
+    ) -> list[float]:
+        return self.metrics.get(vm.id, {}).get(
+            metric, [float("nan")] * self.tick_number
+        )
 
 
 def parse_percent(string) -> float:

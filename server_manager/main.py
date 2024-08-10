@@ -6,6 +6,7 @@ import platform
 from pprint import pformat
 import subprocess
 import sys
+import time
 from typing import Optional
 from attr import dataclass
 import pandas
@@ -53,12 +54,7 @@ def virtualbox_manager_tab(tab: streamlit.delta_generator.DeltaGenerator) -> Non
 def virtualbox_manager_tab_virtual_machine(tab, vm: VirtualMachine):
     vm.info.reload()
 
-    status = {
-        VMState.Running: "🟢",
-        VMState.PowerOff: "🔴",
-    }.get(vm.info.state, "⚠️")
-
-    with tab.expander(f"🖥 {status} **{vm.name}**  ({vm.info.system})  `{vm.id}`"):
+    with tab.expander(f"🖥 **{vm.name}**  `{vm.info.system}`  `{vm.id}`"):
         vm_status_tab, vm_info_tab = streamlit.tabs(["Status", "Info"])
         virtualbox_manager_status_tab(vm_status_tab, vm)
 
@@ -68,19 +64,21 @@ def virtualbox_manager_tab_virtual_machine(tab, vm: VirtualMachine):
 
 
 def virtualbox_manager_status_tab(
-    vm_status_tab: streamlit.delta_generator.DeltaGenerator, vm: VirtualMachine
+    container: streamlit.delta_generator.DeltaGenerator, vm: VirtualMachine
 ) -> None:
-    _vm_status_message(vm_status_tab.empty(), vm)
+    inner = container.container()
 
-    container = vm_status_tab.container()
+    _vm_status_message(inner.empty(), vm)
+
+    _vm_control_buttons(inner.empty(), vm)
 
     virtualbox_manager_metric_plot(
-        container.empty(), vm, Metrics.GUEST_CPU_LOAD_USER, "CPU % (user)"
+        inner.empty(), vm, Metrics.GUEST_CPU_LOAD_USER, "CPU % (user)"
     )
     virtualbox_manager_metric_plot(
-        container.empty(), vm, Metrics.GUEST_CPU_LOAD_KERNEL, "CPU % (kernel)"
+        inner.empty(), vm, Metrics.GUEST_CPU_LOAD_KERNEL, "CPU % (kernel)"
     )
-    virtualbox_manager_metric_plot_ram(container.empty(), vm)
+    virtualbox_manager_metric_plot_ram(inner.empty(), vm)
 
 
 @streamlit.fragment(run_every=5)
@@ -92,12 +90,116 @@ def _vm_status_message(
     vm.info.reload()
     status = vm.info.state
 
-    if status == VMState.Running:
-        container.success("🟢 Running")
-    elif status == VMState.PowerOff:
-        container.error("🔴 Power Off")
-    else:
-        container.warning(f"⚠️ {status.name}")
+    {
+        VMState.Running: lambda: container.success("🟢 Running"),
+        VMState.PowerOff: lambda: container.error("🔴 Power Off"),
+        VMState.Paused: lambda: container.info("🔵 Paused"),
+        VMState.Saved: lambda: container.info("💾 Saved"),
+    }.get(status, lambda: container.warning(f"⚠️ {status.name}"))()
+
+
+def _vm_control_buttons(
+    container: streamlit.delta_generator.DeltaGenerator,
+    vm: VirtualMachine,
+) -> None:
+    container = container.container()
+
+    start, shutdown, kill = container.columns(3)
+
+    def _start():
+        streamlit.toast(f"🔵 Starting `{vm.name}`...")
+        vm.start()
+
+        time.sleep(1)
+        vm.info.reload()
+        if vm.info.state == VMState.Running:
+            streamlit.toast(f"🟢 Started `{vm.name}`...")
+        else:
+            streamlit.toast(f"⛔ Failed to start `{vm.name}`...")
+
+    start.button(
+        "🟢 Start", on_click=_start, key=f"start_{vm.id}", use_container_width=True
+    )
+
+    def _shutdown():
+        streamlit.toast(f"🔵 Shutting down `{vm.name}`...")
+        vm.shutdown()
+
+        time.sleep(1)
+        vm.info.reload()
+        if vm.info.state == VMState.PowerOff:
+            streamlit.toast(f"🔴 Shut down `{vm.name}`...")
+        else:
+            streamlit.toast(f"⛔ Failed to shut down `{vm.name}`...")
+
+    shutdown.button(
+        "🔴 Shutdown",
+        on_click=_shutdown,
+        key=f"shutdown_{vm.id}",
+        use_container_width=True,
+    )
+
+    def _kill():
+        streamlit.toast(f"💀 Killing `{vm.name}`...")
+        vm.kill()
+
+        time.sleep(1)
+        vm.info.reload()
+        if vm.info.state == VMState.PowerOff:
+            streamlit.toast(f"💀 Killed `{vm.name}`...")
+        else:
+            streamlit.toast(f"⛔ Failed to kill `{vm.name}`...")
+
+    kill.button(
+        "💀 Kill", on_click=_kill, key=f"kill_{vm.id}", use_container_width=True
+    )
+
+    pause, save, resume = container.columns(3)
+
+    def _pause():
+        streamlit.toast(f"🔵 Pausing `{vm.name}`...")
+        vm.pause()
+
+        time.sleep(1)
+        vm.info.reload()
+        if vm.info.state == VMState.Paused:
+            streamlit.toast(f"🔵 Paused `{vm.name}`...")
+        else:
+            streamlit.toast(f"⛔ Failed to pause `{vm.name}`...")
+
+    pause.button(
+        "🔵 Pause", on_click=_pause, key=f"pause_{vm.id}", use_container_width=True
+    )
+
+    def _save():
+        streamlit.toast(f"🔵 Saving `{vm.name}`...")
+        vm.save()
+        time.sleep(1)
+
+        vm.info.reload()
+        if vm.info.state == VMState.Saved:
+            streamlit.toast(f"🔵 Saved `{vm.name}`...")
+        else:
+            streamlit.toast(f"⛔ Failed to save `{vm.name}`...")
+
+    save.button(
+        "💾 Save", on_click=_save, key=f"save_{vm.id}", use_container_width=True
+    )
+
+    def _resume():
+        streamlit.toast(f"🟢 Resuming `{vm.name}`...")
+        vm.resume()
+        time.sleep(1)
+
+        vm.info.reload()
+        if vm.info.state == VMState.Running:
+            streamlit.toast(f"🟢 Resumed `{vm.name}`...")
+        else:
+            streamlit.toast(f"⛔ Failed to resume `{vm.name}`...")
+
+    resume.button(
+        "🟢 Resume", on_click=_resume, key=f"resume_{vm.id}", use_container_width=True
+    )
 
 
 @streamlit.fragment(run_every=5)
